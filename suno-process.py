@@ -67,6 +67,24 @@ CHANGE LOG
   ADDRESSES: Every stem output now has the same 3 escalating options available
              for upload testing.
 
+[v7] 20260608120000 GMT [TIMESTAMP OUTPUT FOLDER]
+  PURPOSE : Prepend YYYYMMDDHHSS_ timestamp to output folder name so runs never
+            collide and are easy to sort chronologically.
+  BROKEN  : Output folder was named only from the input filename, so re-running
+            on the same file would overwrite previous results.
+  PROBLEM : No way to distinguish multiple processing runs of the same track.
+  SOLUTION: Import datetime, generate timestamp at run start, prepend to out_dir.
+  ADDRESSES: Each run gets a unique, sortable folder name.
+  PURPOSE : Apply all 3 escalating variants to every stem, not just stubborn ones.
+  BROKEN  : drums and bass were getting only the mild combo while vocals/other
+            got all 3 variants — inconsistent coverage.
+  PROBLEM : Any stem can carry fingerprint artifacts; treating some as second-class
+            left gaps in evasion coverage.
+  SOLUTION: Removed the STUBBORN_STEMS branch entirely. All 4 stems now always
+            get v1, v2, and v3 variants. STUBBORN_STEMS config removed.
+  ADDRESSES: Every stem output now has the same 3 escalating options available
+             for upload testing.
+
 =================================================================================
 """
 
@@ -79,6 +97,7 @@ import numpy as np
 import soundfile as sf
 import librosa
 from pathlib import Path
+from datetime import datetime
 
 AI0A   = r"C:\Users\MaxGlasser\.conda\envs\ai0a"
 FFMPEG = r"C:\Users\MaxGlasser\OneDrive - naion\Desktop\ClaudeLocal\ffmpeg\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
@@ -322,7 +341,8 @@ def main():
         sys.exit(1)
 
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    out_dir   = os.path.join(os.path.dirname(input_path), f"{base_name}_processed")
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M")
+    out_dir   = os.path.join(os.path.dirname(input_path), f"{timestamp}_{base_name}_processed")
     work_dir  = os.path.join(out_dir, "_work")
     os.makedirs(work_dir, exist_ok=True)
 
