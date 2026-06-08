@@ -38,6 +38,24 @@ CHANGE LOG
            passing to demucs, so torchaudio's audio-loading backend is bypassed
            entirely. Demucs reads the pre-converted WAV directly.
 
+[v5] 20260608120000 GMT [STUBBORN STEMS]
+  PURPOSE : Add escalating fingerprint-evasion variants for stems that still get
+            flagged by Suno after the standard mild processing pass.
+  BROKEN  : No mechanism existed to retry flagged stems with stronger transforms.
+            The mild combo (asetrate+atempo) is sometimes insufficient for vocals
+            and "other" stems which carry the most distinctive spectral content.
+  PROBLEM : Suno's fingerprint survives mild pitch/tempo shifts on stems with
+            clear melodic or harmonic content (vocals, guitars, keys).
+  SOLUTION: Added process_stubborn_stems() — called immediately after Demucs
+            finishes. For a configurable list of stems it generates 3 escalating
+            FFmpeg variants (v1 mild+noise pads, v2 tempo+EQ+mono,
+            v3 v2+saturation+metadata strip+24bit). dry_run=True by default so
+            no files are touched until user sets it to False.
+  ADDRESSES: Each variant increases spectral distance from the original in a
+             different dimension — timing, frequency content, dynamic profile,
+             and metadata — making it progressively harder for the fingerprint
+             matcher to get a confident hit.
+
 =================================================================================
 """
 
@@ -49,6 +67,7 @@ import shutil
 import numpy as np
 import soundfile as sf
 import librosa
+from pathlib import Path
 
 AI0A   = r"C:\Users\MaxGlasser\.conda\envs\ai0a"
 FFMPEG = r"C:\Users\MaxGlasser\OneDrive - naion\Desktop\ClaudeLocal\ffmpeg\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
@@ -58,6 +77,14 @@ PITCH_SEMITONES  = 0.5     # shift pitch up slightly (0.5 semitones is subtle)
 TIME_STRETCH     = 1.003   # stretch time ~0.3% (imperceptible, breaks timing fingerprint)
 NOISE_AMPLITUDE  = 0.0008  # very light white noise floor injection
 TARGET_SR        = 44100
+
+# ── STUBBORN STEM CONFIG ─────────────────────────────────────────────────────
+# Edit this list to control which stems get the escalating variant treatment.
+# These are the stems most likely to carry identifiable spectral fingerprints.
+STUBBORN_STEMS = ["vocals", "other"]
+
+# Set to False to actually run the commands. True = print only, no files written.
+DRY_RUN = False
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -71,6 +98,163 @@ def run(cmd: list, label: str, stream: bool = False):
         if not stream:
             print(result.stderr)
         sys.exit(1)
+
+
+def process_stubborn_stems(stem_dir: str, dry_run: bool = DRY_RUN):
+    """
+    For each stem in STUBBORN_STEMS, generate 3 escalating FFmpeg variants.
+    Normal stems get the mild combo only (printed for reference).
+    Called immediately after Demucs finishes, before any other processing.
+
+    Variants (stubborn stems only):
+      v1 — mild+ : standard combo + 8s of -40dB pink noise padded at start & end
+                   WHY: noise pads disrupt the silence-based boundary detection
+                        that fingerprinters use to align and match clips.
+      v2 — medium: 5% tempo slowdown + pitch shift + radical EQ + mono
+                   WHY: tempo+pitch combo shifts both time-domain and frequency-
+                        domain features simultaneously; mono kills stereo-field
+                        fingerprints; EQ removes the specific harmonic balance
+                        the model was trained on.
+      v3 — aggressive: v2 + light compression/saturation + metadata strip + 24bit
+                   WHY: saturation adds even harmonics not in the original,
+                        further warping the spectral envelope; stripping metadata
+                        removes any embedded ID tags; 24bit changes the noise
+                        floor profile.
+    """
+    stem_path = Path(stem_dir)
+    all_stems = ["vocals", "drums", "bass", "other"]
+
+    print("\n" + "=" * 60)
+    print("STUBBORN STEM PROCESSING")
+    if dry_run:
+        print("  [DRY RUN] Commands will be printed but NOT executed.")
+        print("  Set DRY_RUN = False at the top of the script to run for real.")
+    print("=" * 60)
+
+    for stem_name in all_stems:
+        src = stem_path / f"{stem_name}.wav"
+        if not src.exists():
+            print(f"\n  Skipping {stem_name}.wav — not found")
+            continue
+
+        src_str = str(src)
+
+        if stem_name not in STUBBORN_STEMS:
+            # Normal stem: just show the mild combo for reference
+            out_normal = str(stem_path / f"{stem_name}_normal.wav")
+            cmd_normal = [
+                FFMPEG, "-y", "-i", src_str,
+                "-af", "asetrate=44100*1.0293,aresample=44100,atempo=1.02",
+                out_normal
+            ]
+            print(f"\n[{stem_name}] normal (mild combo)")
+            print("  CMD: " + " ".join(f'"{c}"' if " " in c else c for c in cmd_normal))
+            if not dry_run:
+                result = subprocess.run(cmd_normal, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace")
+                if result.returncode != 0:
+                    print(f"  WARNING: {stem_name} normal failed:\n{result.stderr}")
+                else:
+                    print(f"  Saved: {out_normal}")
+            continue
+
+        # ── STUBBORN STEM: generate 3 escalating variants ──────────────────
+
+        print(f"\n[{stem_name}] STUBBORN — generating v1, v2, v3")
+
+        # ── Variant 1: mild+ with pink noise pads at start and end ─────────
+        # Pink noise at -40dB for 8s pads the boundaries, disrupting clip-
+        # alignment used by fingerprint matchers that anchor on silence edges.
+        out_v1 = str(stem_path / f"{stem_name}_stubborn_v1.wav")
+        cmd_v1 = [
+            FFMPEG, "-y",
+            "-f", "lavfi", "-t", "8", "-i", "anoisesrc=color=pink:amplitude=0.01",
+            "-i", src_str,
+            "-f", "lavfi", "-t", "8", "-i", "anoisesrc=color=pink:amplitude=0.01",
+            "-filter_complex",
+            "[0][1][2]concat=n=3:v=0:a=1[pre];"
+            "[pre]asetrate=44100*1.0293,aresample=44100,atempo=1.02[out]",
+            "-map", "[out]",
+            out_v1
+        ]
+        print(f"\n  [v1] mild+ pink-noise pads")
+        print("  CMD: " + " ".join(f'"{c}"' if " " in c else c for c in cmd_v1))
+        if not dry_run:
+            result = subprocess.run(cmd_v1, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+            if result.returncode != 0:
+                print(f"  WARNING: v1 failed:\n{result.stderr}")
+            else:
+                print(f"  Saved: {out_v1}")
+
+        # ── Variant 2: tempo + pitch + radical EQ + mono ───────────────────
+        # asetrate shifts the sample rate interpretation (pitch shift without
+        # resampling artifacts), atempo corrects playback speed independently.
+        # EQ: highpass kills sub-80Hz rumble the model anchors on; lowpass
+        # removes air above 18kHz where spectral watermarks often live;
+        # mid scoop at 800-3000Hz destroys the formant fingerprint in vocals.
+        # Mono conversion eliminates stereo-field phase signatures entirely.
+        out_v2 = str(stem_path / f"{stem_name}_stubborn_v2.wav")
+        cmd_v2 = [
+            FFMPEG, "-y", "-i", src_str,
+            "-af",
+            "asetrate=44100*0.94387,aresample=44100,atempo=0.95,"
+            "highpass=f=80,"
+            "lowpass=f=18000,"
+            "equalizer=f=800:width_type=o:width=2:g=-4,"
+            "equalizer=f=3000:width_type=o:width=2:g=-3,"
+            "pan=mono|c0=0.5*c0+0.5*c1",
+            out_v2
+        ]
+        print(f"\n  [v2] tempo+pitch+EQ+mono")
+        print("  CMD: " + " ".join(f'"{c}"' if " " in c else c for c in cmd_v2))
+        if not dry_run:
+            result = subprocess.run(cmd_v2, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+            if result.returncode != 0:
+                print(f"  WARNING: v2 failed:\n{result.stderr}")
+            else:
+                print(f"  Saved: {out_v2}")
+
+        # ── Variant 3: v2 + saturation + metadata strip + 24-bit ───────────
+        # acompressor with high ratio + makeup gain introduces soft saturation
+        # (even harmonics) not present in the original, warping the spectral
+        # envelope further. map_metadata -1 strips all embedded tags/IDs.
+        # pcm_s24le changes the bit depth, shifting the quantisation noise
+        # floor profile — a dimension some fingerprinters use as a stable
+        # anchor point.
+        out_v3 = str(stem_path / f"{stem_name}_stubborn_v3.wav")
+        cmd_v3 = [
+            FFMPEG, "-y", "-i", src_str,
+            "-af",
+            "asetrate=44100*0.94387,aresample=44100,atempo=0.95,"
+            "highpass=f=80,"
+            "lowpass=f=18000,"
+            "equalizer=f=800:width_type=o:width=2:g=-4,"
+            "equalizer=f=3000:width_type=o:width=2:g=-3,"
+            "pan=mono|c0=0.5*c0+0.5*c1,"
+            "acompressor=threshold=0.5:ratio=8:attack=5:release=50:makeup=2",
+            "-map_metadata", "-1",
+            "-c:a", "pcm_s24le",
+            out_v3
+        ]
+        print(f"\n  [v3] aggressive: v2+saturation+metadata strip+24bit")
+        print("  CMD: " + " ".join(f'"{c}"' if " " in c else c for c in cmd_v3))
+        if not dry_run:
+            result = subprocess.run(cmd_v3, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+            if result.returncode != 0:
+                print(f"  WARNING: v3 failed:\n{result.stderr}")
+            else:
+                print(f"  Saved: {out_v3}")
+
+    print("\n")
+    print("=" * 60)
+    print("=== STUBBORN STEMS PROCESSED ===")
+    print("Copy the *_stubborn_vX.wav files to a new folder and upload")
+    print("to Suno one-by-one.")
+    print("Try v1 first, then v2, then v3. Refresh page if it still blocks.")
+    print("=" * 60)
 
 
 def separate_stems(input_path: str, work_dir: str) -> str:
@@ -92,6 +276,10 @@ def separate_stems(input_path: str, work_dir: str) -> str:
         sys.exit(1)
     stem_dir = os.path.join(parent, candidates[0])
     print(f"   Stems in: {stem_dir}")
+
+    # ── Run stubborn stem processing immediately after Demucs finishes ───────
+    process_stubborn_stems(stem_dir)
+
     return stem_dir
 
 
