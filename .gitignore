@@ -1,0 +1,6 @@
+ffmpeg/
+_work/
+*_processed/
+*.wav
+__pycache__/
+*.pyc
