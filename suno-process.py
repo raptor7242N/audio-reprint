@@ -56,6 +56,17 @@ CHANGE LOG
              and metadata — making it progressively harder for the fingerprint
              matcher to get a confident hit.
 
+[v6] 20260608120000 GMT [ALL STEMS EQUAL]
+  PURPOSE : Apply all 3 escalating variants to every stem, not just stubborn ones.
+  BROKEN  : drums and bass were getting only the mild combo while vocals/other
+            got all 3 variants — inconsistent coverage.
+  PROBLEM : Any stem can carry fingerprint artifacts; treating some as second-class
+            left gaps in evasion coverage.
+  SOLUTION: Removed the STUBBORN_STEMS branch entirely. All 4 stems now always
+            get v1, v2, and v3 variants. STUBBORN_STEMS config removed.
+  ADDRESSES: Every stem output now has the same 3 escalating options available
+             for upload testing.
+
 =================================================================================
 """
 
@@ -79,10 +90,6 @@ NOISE_AMPLITUDE  = 0.0008  # very light white noise floor injection
 TARGET_SR        = 44100
 
 # ── STUBBORN STEM CONFIG ─────────────────────────────────────────────────────
-# Edit this list to control which stems get the escalating variant treatment.
-# These are the stems most likely to carry identifiable spectral fingerprints.
-STUBBORN_STEMS = ["vocals", "other"]
-
 # Set to False to actually run the commands. True = print only, no files written.
 DRY_RUN = False
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,28 +146,8 @@ def process_stubborn_stems(stem_dir: str, dry_run: bool = DRY_RUN):
 
         src_str = str(src)
 
-        if stem_name not in STUBBORN_STEMS:
-            # Normal stem: just show the mild combo for reference
-            out_normal = str(stem_path / f"{stem_name}_normal.wav")
-            cmd_normal = [
-                FFMPEG, "-y", "-i", src_str,
-                "-af", "asetrate=44100*1.0293,aresample=44100,atempo=1.02",
-                out_normal
-            ]
-            print(f"\n[{stem_name}] normal (mild combo)")
-            print("  CMD: " + " ".join(f'"{c}"' if " " in c else c for c in cmd_normal))
-            if not dry_run:
-                result = subprocess.run(cmd_normal, capture_output=True, text=True,
-                                        encoding="utf-8", errors="replace")
-                if result.returncode != 0:
-                    print(f"  WARNING: {stem_name} normal failed:\n{result.stderr}")
-                else:
-                    print(f"  Saved: {out_normal}")
-            continue
-
-        # ── STUBBORN STEM: generate 3 escalating variants ──────────────────
-
-        print(f"\n[{stem_name}] STUBBORN — generating v1, v2, v3")
+        # All stems get all 3 escalating variants equally
+        print(f"\n[{stem_name}] generating v1, v2, v3")
 
         # ── Variant 1: mild+ with pink noise pads at start and end ─────────
         # Pink noise at -40dB for 8s pads the boundaries, disrupting clip-
